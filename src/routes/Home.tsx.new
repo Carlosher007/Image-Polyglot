@@ -1,0 +1,271 @@
+import React, { useCallback, useEffect } from 'react';
+import { toast } from 'react-hot-toast';
+import ImageDropzone from '../components/ImageDropzone';
+import PreviewCard from '../components/PreviewCard';
+import ResultPanel from '../components/ResultPanel';
+import { useAppStore } from '../store/appStore';
+
+const Home: React.FC = () => {
+  const {
+    file,
+    mode,
+    targetLang,
+    result,
+    processing,
+    setFile,
+    setMode,
+    setLang,
+    setResult,
+    setProcessing,
+    setError,
+    setElapsedTime,
+    reset,
+  } = useAppStore();
+
+  // Resetear resultados cuando cambia la imagen
+  useEffect(() => {
+    if (file) {
+      setResult(null);
+    }
+  }, [file, setResult]);
+
+  // Handler para seleccionar imagen
+  const handleImageSelect = useCallback(
+    (selectedFile: File) => {
+      setFile(selectedFile);
+      reset();
+    },
+    [setFile, reset]
+  );
+
+  // Función para procesar la imagen
+  const processImage = useCallback(async () => {
+    if (!file) return;
+
+    try {
+      console.group('Procesamiento de imagen');
+      console.log('Iniciando procesamiento...');
+      console.log('Archivo:', { 
+        name: file.name, 
+        size: file.size, 
+        type: file.type 
+      });
+      console.log('Modo:', mode);
+      console.log('Idioma destino:', targetLang);
+      
+      // Información de depuración
+      console.log('=== DEBUG INFO ===');
+      console.log(`WebGPU disponible: ${'gpu' in navigator}`);
+      console.log(`User Agent: ${navigator.userAgent}`);
+      console.log('=================');
+      
+      setProcessing(true);
+      setError(null);
+      
+      toast.success('Procesando imagen...', { id: 'processing' });
+
+      // Convertir File a Blob para pasar a los workers
+      console.log('Convirtiendo archivo a Blob...');
+      const arrayBuffer = await file.arrayBuffer();
+      const imageBlob = new Blob([arrayBuffer], { type: file.type });
+      console.log('Blob creado:', { 
+        size: imageBlob.size, 
+        type: imageBlob.type 
+      });
+
+      const startTime = performance.now();
+      let originalText = '';
+
+      // Seleccionar worker según el modo
+      if (mode === 'printed') {
+        console.log('Modo seleccionado: OCR (Texto impreso)');
+        try {
+          // Procesar con OCR
+          console.log('Creando OCR worker...');
+          const ocrWorker = new Worker(
+            new URL('../workers/ocrWorker.ts', import.meta.url),
+            { type: 'module' }
+          );
+          console.log('OCR worker creado correctamente');
+
+          originalText = await new Promise<string>((resolve, reject) => {
+            console.log('Enviando mensaje al OCR worker...');
+            ocrWorker.postMessage({ imageBlob, lang: 'eng' });
+            console.log('Mensaje enviado al OCR worker');
+
+            ocrWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+              console.log('Respuesta recibida del OCR worker:', e.data);
+              const { type, payload } = e.data;
+
+              if (type === 'result') {
+                console.log('OCR exitoso:', payload);
+                const result = payload as ImageProcessResult;
+                resolve(result.originalText);
+                ocrWorker.terminate();
+              } else if (type === 'error') {
+                console.error('Error en OCR worker:', payload);
+                reject(new Error(payload.message));
+                ocrWorker.terminate();
+              } else if (type === 'progress') {
+                console.log('Progreso OCR:', payload);
+              }
+            };
+
+            ocrWorker.onerror = (err: Event) => {
+              console.error('Error en el OCR worker:', err);
+              reject(new Error('Error en el worker de OCR'));
+              ocrWorker.terminate();
+            };
+          });
+          console.log('Texto reconocido por OCR:', originalText);
+        } catch (err) {
+          console.error('Error al inicializar o procesar con OCR worker:', err);
+          throw err;
+        }
+      } else if (mode === 'caption') {
+        console.log('Modo seleccionado: Caption (Descripción de escena)');
+        // Procesar con Caption
+        const captionWorker = new Worker(
+          new URL('../workers/captionWorker.ts', import.meta.url),
+          { type: 'module' }
+        );
+
+        originalText = await new Promise<string>((resolve, reject) => {
+          captionWorker.postMessage({ imageBlob });
+
+          captionWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+            const { type, payload } = e.data;
+
+            if (type === 'result') {
+              const result = payload as ImageProcessResult;
+              resolve(result.originalText);
+              captionWorker.terminate();
+            } else if (type === 'error') {
+              reject(new Error(payload.message));
+              captionWorker.terminate();
+            }
+          };
+        });
+      } else if (mode === 'handwriting') {
+        console.log('Modo seleccionado: Handwriting (Escritura a mano)');
+        // Procesar con Handwriting
+        const handwritingWorker = new Worker(
+          new URL('../workers/handwritingWorker.ts', import.meta.url),
+          { type: 'module' }
+        );
+
+        originalText = await new Promise<string>((resolve, reject) => {
+          handwritingWorker.postMessage({ imageBlob });
+
+          handwritingWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+            const { type, payload } = e.data;
+
+            if (type === 'result') {
+              const result = payload as ImageProcessResult;
+              resolve(result.originalText);
+              handwritingWorker.terminate();
+            } else if (type === 'error') {
+              reject(new Error(payload.message));
+              handwritingWorker.terminate();
+            }
+          };
+        });
+      }
+
+      // Traducir el texto original
+      let translatedText = '';
+      if (originalText) {
+        console.log('Iniciando traducción del texto...');
+        const translateWorker = new Worker(
+          new URL('../workers/translateWorker.ts', import.meta.url),
+          { type: 'module' }
+        );
+
+        translatedText = await new Promise<string>((resolve, reject) => {
+          translateWorker.postMessage({ text: originalText, targetLang });
+
+          translateWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+            const { type, payload } = e.data;
+
+            if (type === 'result') {
+              const result = payload as TranslateResult;
+              resolve(result.translatedText);
+              translateWorker.terminate();
+            } else if (type === 'error') {
+              reject(new Error(payload.message));
+              translateWorker.terminate();
+            }
+          };
+        });
+        console.log('Texto traducido:', translatedText);
+      }
+
+      const totalDuration = performance.now() - startTime;
+      console.log('Tiempo total de procesamiento:', totalDuration, 'ms');
+
+      // Guardar resultado
+      setResult({
+        original: originalText,
+        translated: translatedText,
+        durationMs: totalDuration,
+      });
+
+      setElapsedTime(totalDuration);
+      toast.success('Procesamiento completado');
+      console.groupEnd();
+    } catch (error) {
+      console.error('Error procesando imagen:', error);
+      setError(error instanceof Error ? error.message : 'Error desconocido');
+      toast.error(error instanceof Error ? error.message : 'Error desconocido');
+      console.groupEnd();
+    } finally {
+      setProcessing(false);
+    }
+  }, [
+    file,
+    mode,
+    targetLang,
+    setProcessing,
+    setResult,
+    setError,
+    setElapsedTime,
+  ]);
+
+  return (
+    <div className="container mx-auto p-4 max-w-6xl">
+      <header className="mb-8 text-center">
+        <h1 className="text-3xl font-bold text-gray-800 mb-2">
+          Image Polyglot
+        </h1>
+        <p className="text-gray-600">
+          Carga una imagen para detectar y traducir texto, generar descripciones
+          o reconocer escritura a mano.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          {!file ? (
+            <ImageDropzone onSelect={handleImageSelect} />
+          ) : (
+            <PreviewCard
+              file={file}
+              mode={mode}
+              targetLang={targetLang}
+              onModeChange={setMode}
+              onLangChange={setLang}
+              onProcess={processImage}
+              isProcessing={processing}
+            />
+          )}
+        </div>
+
+        <div>
+          <ResultPanel result={result} isLoading={processing} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Home;
